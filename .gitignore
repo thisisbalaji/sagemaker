@@ -6,3 +6,9 @@
 !*.tfvars.example
 crash.log
 tfplan
+.venv/
+data/
+eda/output/
+__pycache__/
+.build/
+.pytest_cache/
