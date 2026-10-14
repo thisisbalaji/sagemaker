@@ -7,6 +7,7 @@ Binds to localhost only, since anyone who can reach it can open Studio as any us
 """
 
 import argparse
+import html
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -36,26 +37,35 @@ def list_user_profiles(domain_id):
     return sorted(names)
 
 
-def create_presigned_url(body):
-    domain_id = (body.get("domainId") or "").strip()
-    profile = (body.get("userProfileName") or "").strip()
+def create_presigned_url(form):
+    domain_id = form.get("domainId", "").strip()
+    profile = form.get("userProfileName", "").strip()
     if not domain_id or not profile:
-        raise ValueError("domainId and userProfileName are required")
+        raise ValueError("Domain and user profile name are required")
 
-    session_seconds = int(body.get("sessionExpirationSeconds") or 43200)
-    expires_seconds = int(body.get("expiresInSeconds") or 300)
+    try:
+        session_seconds = round(float(form.get("sessionHours") or 12) * 3600)
+    except ValueError:
+        raise ValueError("Session length must be a number of hours")
     if not 1800 <= session_seconds <= 43200:
-        raise ValueError("Session duration must be between 1800 and 43200 seconds")
-    if not 5 <= expires_seconds <= 300:
-        raise ValueError("URL expiry must be between 5 and 300 seconds")
+        raise ValueError("Session length must be between 0.5 and 12 hours")
 
+    # The browser follows the redirect immediately, so the URL only needs to live briefly.
     resp = sagemaker.create_presigned_domain_url(
         DomainId=domain_id,
         UserProfileName=profile,
         SessionExpirationDurationInSeconds=session_seconds,
-        ExpiresInSeconds=expires_seconds,
+        ExpiresInSeconds=30,
     )
-    return {"url": resp["AuthorizedUrl"], "expiresInSeconds": expires_seconds}
+    return resp["AuthorizedUrl"]
+
+
+def error_page(message):
+    return f"""<!doctype html><meta charset="utf-8"><title>Could not open Studio</title>
+<style>body{{font:15px/1.5 -apple-system,sans-serif;max-width:560px;margin:48px auto;padding:0 16px}}
+@media(prefers-color-scheme:dark){{body{{background:#0f1216;color:#e6e9ee}}}}</style>
+<h1>Could not open Studio</h1><p>{html.escape(message)}</p>
+<p>Close this tab, fix the details, and try again.</p>""".encode()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -75,16 +85,26 @@ class Handler(BaseHTTPRequestHandler):
             self._json(502, {"error": str(e)})
 
     def do_POST(self):
-        if urlparse(self.path).path != "/api/presigned-url":
+        if urlparse(self.path).path != "/open":
             return self._json(404, {"error": "Not found"})
+        # Only accept submissions from this app's own page, not other sites.
+        origin = self.headers.get("Origin")
+        if origin and urlparse(origin).netloc != self.headers.get("Host"):
+            return self._send(403, error_page("Request came from another site."), "text/html; charset=utf-8")
         try:
             length = int(self.headers.get("Content-Length") or 0)
-            body = json.loads(self.rfile.read(length) or b"{}")
-            self._json(200, create_presigned_url(body))
+            form = {k: v[0] for k, v in parse_qs(self.rfile.read(length).decode()).items()}
+            url = create_presigned_url(form)
         except ValueError as e:
-            self._json(400, {"error": str(e)})
+            return self._send(400, error_page(str(e)), "text/html; charset=utf-8")
         except (ClientError, BotoCoreError) as e:
-            self._json(502, {"error": str(e)})
+            return self._send(502, error_page(str(e)), "text/html; charset=utf-8")
+        self.send_response(302)
+        self.send_header("Location", url)
+        self.send_header("Content-Length", "0")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.end_headers()
 
     def _json(self, status, data):
         self._send(status, json.dumps(data).encode(), "application/json")
