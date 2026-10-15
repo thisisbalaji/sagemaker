@@ -12,3 +12,6 @@ eda/output/
 __pycache__/
 .build/
 .pytest_cache/
+node_modules/
+portal/frontend/dist/
+*.tsbuildinfo
